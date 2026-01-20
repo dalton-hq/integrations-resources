@@ -1,0 +1,609 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Dalton AWS Integration - Management Account Setup
+  This template creates:
+  1. An IAM role that allows Dalton to list your AWS Organization accounts
+  2. A StackSet that deploys read-only viewer roles to all member accounts
+  3. Optionally, a viewer role for the management account itself
+
+  Deploy this in your AWS Organizations management account.
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: Unique identifier for secure cross-account access (provided by Dalton)
+    MinLength: 1
+
+  # StackSet deployment target
+  DeploymentTarget:
+    Type: String
+    Default: 'organization'
+    AllowedValues: ['organization', 'ou']
+    Description: Deploy to entire organization or specific OUs
+
+  OrganizationalUnitIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: If deploying to specific OUs, provide comma-separated OU IDs (e.g., ou-xxxx-xxxxxxxx)
+
+  # Management account resources
+  IncludeManagementAccount:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Also create viewer role for resources in this management account
+
+  # Service toggles (passed to StackSet)
+  EnableFullAccess:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Grant read-only access to ALL AWS services
+
+  EnableS3:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableRDS:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableEC2:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableLambda:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableCloudWatch:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableDynamoDB:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableECS:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableSNS:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableSQS:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableSecretsManager:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  EnableRoute53:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+  # StackSet regions
+  TargetRegions:
+    Type: CommaDelimitedList
+    Default: 'us-east-1'
+    Description: Comma-separated list of AWS regions to deploy to
+
+Conditions:
+  DeployToOrganization: !Equals [!Ref DeploymentTarget, 'organization']
+  CreateManagementAccountRole: !Equals [!Ref IncludeManagementAccount, 'true']
+  FullAccessEnabled: !Equals [!Ref EnableFullAccess, 'true']
+  # Individual service conditions - only create when Full Access is NOT enabled
+  # This avoids creating redundant policies when Full Access already covers everything
+  S3Enabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableS3, 'true']
+  RDSEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableRDS, 'true']
+  EC2Enabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableEC2, 'true']
+  LambdaEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableLambda, 'true']
+  CloudWatchEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableCloudWatch, 'true']
+  DynamoDBEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableDynamoDB, 'true']
+  ECSEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableECS, 'true']
+  SNSEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableSNS, 'true']
+  SQSEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableSQS, 'true']
+  SecretsManagerEnabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableSecretsManager, 'true']
+  Route53Enabled: !And
+    - !Not [!Equals [!Ref EnableFullAccess, 'true']]
+    - !Equals [!Ref EnableRoute53, 'true']
+
+Resources:
+  #############################################
+  # IAM Role for Organizations API Access
+  # Allows Dalton to list accounts and OUs
+  #############################################
+  DaltonOrganizationsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'Dalton-Organizations-Reader-${AWS::AccountId}'
+      Description: Allows Dalton to list AWS Organization accounts and OUs
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::767398131998:role/DaltonIntegrationsRole'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalId
+      Policies:
+        - PolicyName: OrganizationsReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'organizations:ListAccounts'
+                  - 'organizations:ListAccountsForParent'
+                  - 'organizations:ListOrganizationalUnitsForParent'
+                  - 'organizations:ListRoots'
+                  - 'organizations:DescribeOrganization'
+                  - 'organizations:DescribeAccount'
+                  - 'organizations:DescribeOrganizationalUnit'
+                Resource: '*'
+
+  #############################################
+  # Lambda function to get Organization Root ID
+  # Used when deploying to entire organization
+  #############################################
+  GetOrgRootLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: DeployToOrganization
+    Properties:
+      RoleName: !Sub 'dalton-get-org-root-role-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: ListOrgRoots
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'organizations:ListRoots'
+                Resource: '*'
+
+  GetOrgRootLambda:
+    Type: AWS::Lambda::Function
+    Condition: DeployToOrganization
+    Properties:
+      FunctionName: !Sub 'dalton-get-org-root-${AWS::StackName}'
+      Runtime: python3.11
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt GetOrgRootLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+
+              try:
+                  org = boto3.client('organizations')
+                  roots = org.list_roots()['Roots']
+                  root_id = roots[0]['Id'] if roots else ''
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'RootId': root_id})
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  OrganizationRootId:
+    Type: Custom::GetOrgRoot
+    Condition: DeployToOrganization
+    Properties:
+      ServiceToken: !GetAtt GetOrgRootLambda.Arn
+
+  #############################################
+  # StackSet for Member Account Deployment
+  # Auto-deploys viewer role to all member accounts
+  #############################################
+  DaltonViewerStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: dalton-aws-viewer-roles
+      Description: Deploys Dalton viewer IAM role to member accounts for monitoring
+      PermissionModel: SERVICE_MANAGED
+      CallAs: SELF
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      Parameters:
+        - ParameterKey: ExternalId
+          ParameterValue: !Ref ExternalId
+        - ParameterKey: EnableFullAccess
+          ParameterValue: !Ref EnableFullAccess
+        - ParameterKey: EnableS3
+          ParameterValue: !Ref EnableS3
+        - ParameterKey: EnableRDS
+          ParameterValue: !Ref EnableRDS
+        - ParameterKey: EnableEC2
+          ParameterValue: !Ref EnableEC2
+        - ParameterKey: EnableLambda
+          ParameterValue: !Ref EnableLambda
+        - ParameterKey: EnableCloudWatch
+          ParameterValue: !Ref EnableCloudWatch
+        - ParameterKey: EnableDynamoDB
+          ParameterValue: !Ref EnableDynamoDB
+        - ParameterKey: EnableECS
+          ParameterValue: !Ref EnableECS
+        - ParameterKey: EnableSNS
+          ParameterValue: !Ref EnableSNS
+        - ParameterKey: EnableSQS
+          ParameterValue: !Ref EnableSQS
+        - ParameterKey: EnableSecretsManager
+          ParameterValue: !Ref EnableSecretsManager
+        - ParameterKey: EnableRoute53
+          ParameterValue: !Ref EnableRoute53
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !If
+              - DeployToOrganization
+              - - !GetAtt OrganizationRootId.RootId
+              - !Ref OrganizationalUnitIds
+          Regions: !Ref TargetRegions
+      TemplateURL: https://cf-templates-w9lau7h9v2y20-eu-north-1.s3.eu-north-1.amazonaws.com/aws-generic/stackset.yaml
+
+  #############################################
+  # Management Account Viewer Role (Optional)
+  # Same permissions as member accounts
+  #############################################
+  DaltonViewerRole:
+    Type: AWS::IAM::Role
+    Condition: CreateManagementAccountRole
+    Properties:
+      RoleName: Dalton-AWS-Viewer
+      Description: Read-only access to AWS resources for Dalton monitoring (management account)
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::767398131998:role/DaltonIntegrationsRole'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalId
+      # Attach AWS managed ReadOnlyAccess policy when Full Access is enabled
+      ManagedPolicyArns: !If
+        - FullAccessEnabled
+        - - 'arn:aws:iam::aws:policy/ReadOnlyAccess'
+        - !Ref 'AWS::NoValue'
+
+  # S3 Read-Only Policy (Management Account)
+  MgmtS3ReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: S3Enabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-S3-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetBucketLocation'
+              - 's3:GetBucketTagging'
+              - 's3:GetBucketVersioning'
+              - 's3:GetBucketPolicy'
+              - 's3:GetBucketPolicyStatus'
+              - 's3:GetBucketPublicAccessBlock'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:GetLifecycleConfiguration'
+              - 's3:GetBucketLogging'
+              - 's3:GetReplicationConfiguration'
+              - 's3:ListAllMyBuckets'
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:GetObjectTagging'
+              - 's3:GetObjectVersion'
+            Resource: '*'
+
+  # RDS Read-Only Policy (Management Account)
+  MgmtRDSReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: RDSEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-RDS-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'rds:Describe*'
+              - 'rds:List*'
+              - 'rds:DownloadDBLogFilePortion'
+            Resource: '*'
+
+  # EC2 Read-Only Policy (Management Account)
+  MgmtEC2ReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: EC2Enabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-EC2-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:Describe*'
+              - 'ec2:GetConsoleOutput'
+              - 'ec2:GetConsoleScreenshot'
+              - 'elasticloadbalancing:Describe*'
+              - 'autoscaling:Describe*'
+            Resource: '*'
+
+  # Lambda Read-Only Policy (Management Account)
+  MgmtLambdaReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: LambdaEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-Lambda-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'lambda:GetFunction'
+              - 'lambda:GetFunctionConfiguration'
+              - 'lambda:GetPolicy'
+              - 'lambda:ListFunctions'
+              - 'lambda:ListTags'
+              - 'lambda:ListVersionsByFunction'
+              - 'lambda:ListAliases'
+              - 'lambda:ListEventSourceMappings'
+            Resource: '*'
+
+  # CloudWatch Read-Only Policy (Management Account)
+  MgmtCloudWatchReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: CloudWatchEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-CloudWatch-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'cloudwatch:Describe*'
+              - 'cloudwatch:Get*'
+              - 'cloudwatch:List*'
+              - 'logs:Describe*'
+              - 'logs:Get*'
+              - 'logs:FilterLogEvents'
+              - 'logs:StartQuery'
+              - 'logs:StopQuery'
+              - 'logs:GetQueryResults'
+            Resource: '*'
+
+  # DynamoDB Read-Only Policy (Management Account)
+  MgmtDynamoDBReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: DynamoDBEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-DynamoDB-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'dynamodb:Describe*'
+              - 'dynamodb:List*'
+              - 'dynamodb:GetItem'
+              - 'dynamodb:BatchGetItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Resource: '*'
+
+  # ECS Read-Only Policy (Management Account)
+  MgmtECSReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: ECSEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-ECS-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'ecs:Describe*'
+              - 'ecs:List*'
+              - 'ecr:Describe*'
+              - 'ecr:GetRepositoryPolicy'
+              - 'ecr:List*'
+              - 'ecr:BatchGetImage'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'eks:Describe*'
+              - 'eks:List*'
+            Resource: '*'
+
+  # SNS Read-Only Policy (Management Account)
+  MgmtSNSReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: SNSEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-SNS-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sns:GetTopicAttributes'
+              - 'sns:GetSubscriptionAttributes'
+              - 'sns:List*'
+            Resource: '*'
+
+  # SQS Read-Only Policy (Management Account)
+  MgmtSQSReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: SQSEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-SQS-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sqs:GetQueueAttributes'
+              - 'sqs:GetQueueUrl'
+              - 'sqs:List*'
+            Resource: '*'
+
+  # Secrets Manager Read-Only Policy (Management Account - metadata only)
+  MgmtSecretsManagerReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: SecretsManagerEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-SecretsManager-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'secretsmanager:DescribeSecret'
+              - 'secretsmanager:ListSecrets'
+              - 'secretsmanager:GetResourcePolicy'
+            Resource: '*'
+          - Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: '*'
+
+  # Route53 Read-Only Policy (Management Account)
+  MgmtRoute53ReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: Route53Enabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-Route53-ReadOnly-${AWS::AccountId}'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'route53:Get*'
+              - 'route53:List*'
+              - 'route53:TestDNSAnswer'
+            Resource: '*'
+
+  # Deny policy for sensitive values (Management Account)
+  # This overrides the ReadOnlyAccess managed policy to prevent reading secret values
+  MgmtFullAccessDenySecretsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: FullAccessEnabled
+    DependsOn: DaltonViewerRole
+    Properties:
+      ManagedPolicyName: !Sub 'Dalton-DenySecretValues-${AWS::AccountId}'
+      Description: 'Deny access to secret/sensitive values (safety net for ReadOnlyAccess policy)'
+      Roles:
+        - !If [CreateManagementAccountRole, !Ref DaltonViewerRole, !Ref 'AWS::NoValue']
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenySecretValues
+            Effect: Deny
+            Action:
+              - 'secretsmanager:GetSecretValue'
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+            Resource: '*'
+
+Outputs:
+  OrganizationsRoleArn:
+    Description: ARN of the IAM role for listing organization accounts (use this for Dalton configuration)
+    Value: !GetAtt DaltonOrganizationsRole.Arn
+
+  ViewerRoleArn:
+    Condition: CreateManagementAccountRole
+    Description: ARN of the viewer role in this management account
+    Value: !GetAtt DaltonViewerRole.Arn
+
+  ViewerRoleName:
+    Description: Name of the viewer role deployed to member accounts
+    Value: Dalton-AWS-Viewer
+
+  ExternalId:
+    Description: External ID used for secure cross-account access
+    Value: !Ref ExternalId
+
+  StackSetName:
+    Description: Name of the StackSet deploying to member accounts
+    Value: !Ref DaltonViewerStackSet
+
+  ManagementAccountId:
+    Description: This management account ID
+    Value: !Ref 'AWS::AccountId'
+
+  DeploymentScope:
+    Description: Scope of deployment (organization or specific OUs)
+    Value: !If
+      - DeployToOrganization
+      - 'Entire Organization'
+      - !Join [', ', !Ref OrganizationalUnitIds]
