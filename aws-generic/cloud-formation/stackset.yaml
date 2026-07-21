@@ -38,6 +38,10 @@ Metadata:
           default: Security Services
         Parameters:
           - EnableSecretsManager
+      - Label:
+          default: Kubernetes Services
+        Parameters:
+          - EnableAgentlessEKS
 
 Parameters:
   ExternalId:
@@ -143,6 +147,14 @@ Parameters:
       - 'false'
     Description: Enable read-only access to Amazon Route 53
 
+  EnableAgentlessEKS:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable opt-in agentless EKS monitoring (creates a dedicated Dalton-EKS-Agentless role and grants the viewer role permission to auto-enroll EKS access entries)
+
 Conditions:
   FullAccessEnabled: !Equals [!Ref EnableFullAccess, 'true']
   NotFullAccess: !Not [!Equals [!Ref EnableFullAccess, 'true']]
@@ -158,6 +170,7 @@ Conditions:
   SQSEnabled: !And [!Equals [!Ref EnableSQS, 'true'], !Condition NotFullAccess]
   SecretsManagerEnabled: !And [!Equals [!Ref EnableSecretsManager, 'true'], !Condition NotFullAccess]
   Route53Enabled: !And [!Equals [!Ref EnableRoute53, 'true'], !Condition NotFullAccess]
+  AgentlessEKSEnabled: !Equals [!Ref EnableAgentlessEKS, 'true']
 
 Resources:
   # IAM Role with fixed name for consistency across all accounts in the organization
@@ -500,6 +513,80 @@ Resources:
               - 'route53:ListQueryLoggingConfigs'
             Resource: '*'
 
+  # Agentless EKS role (opt-in)
+  # Dedicated role assumed by the Dalton collector to read EKS clusters directly,
+  # without deploying a per-cluster agent. Only created when EnableAgentlessEKS is 'true'.
+  DaltonEKSAgentlessRole:
+    Type: AWS::IAM::Role
+    Condition: AgentlessEKSEnabled
+    Properties:
+      RoleName: !Sub 'Dalton-EKS-Agentless-${AWS::AccountId}'
+      Description: 'Role assumed by the Dalton collector for agentless EKS monitoring (deployed via StackSet)'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: 'arn:aws:iam::767398131998:role/DaltonCollectorRole'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalId
+      Policies:
+        - PolicyName: !Sub 'Dalton-EKS-Agentless-Describe-${AWS::AccountId}'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EKSDescribeCluster
+                Effect: Allow
+                Action:
+                  - 'eks:DescribeCluster'
+                Resource: !Sub 'arn:aws:eks:*:${AWS::AccountId}:cluster/*'
+      Tags:
+        - Key: ManagedBy
+          Value: Dalton
+        - Key: Purpose
+          Value: EKS-Agentless
+        - Key: DeploymentMethod
+          Value: StackSet
+
+  # Agentless EKS auto-enrollment permissions (opt-in)
+  # Attached to the existing viewer role as a separate RolePolicy so the flag-off
+  # template is byte-for-byte unchanged in effect. Grants the viewer role the ability
+  # to enroll the agentless role above into cluster access entries.
+  DaltonAWSRoleAgentlessEKSPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: AgentlessEKSEnabled
+    Properties:
+      RoleName: !Ref DaltonAWSRole
+      PolicyName: !Sub 'Dalton-EKS-Agentless-Enroll-${AWS::AccountId}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EKSManageAgentlessAccessEntry
+            Effect: Allow
+            Action:
+              - 'eks:CreateAccessEntry'
+              - 'eks:DeleteAccessEntry'
+              - 'eks:DescribeAccessEntry'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'eks:principalArn': !Sub 'arn:aws:iam::${AWS::AccountId}:role/Dalton-EKS-Agentless-${AWS::AccountId}'
+          - Sid: EKSManageAgentlessAccessPolicy
+            Effect: Allow
+            Action:
+              - 'eks:AssociateAccessPolicy'
+              - 'eks:DisassociateAccessPolicy'
+            # AssociateAccessPolicy/DisassociateAccessPolicy do not support the
+            # eks:principalArn condition key, so scope the resource to the agentless
+            # role's access-entry ARN to prevent attaching AdminView to arbitrary principals.
+            Resource: !Sub 'arn:aws:eks:*:${AWS::AccountId}:access-entry/*/role/${AWS::AccountId}/Dalton-EKS-Agentless-${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                'eks:policyArn': 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminViewPolicy'
+
 Outputs:
   RoleArn:
     Description: The ARN of the created IAM Role for Dalton
@@ -516,3 +603,8 @@ Outputs:
   ExternalId:
     Description: The External ID used for this integration
     Value: !Ref ExternalId
+
+  AgentlessEKSRoleArn:
+    Condition: AgentlessEKSEnabled
+    Description: The ARN of the agentless EKS role Dalton assumes to monitor EKS clusters
+    Value: !GetAtt DaltonEKSAgentlessRole.Arn
