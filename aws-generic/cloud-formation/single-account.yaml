@@ -525,7 +525,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: 'arn:aws:iam::767398131998:user/vaticy-cluster-watcher'
+              AWS: 'arn:aws:iam::767398131998:role/DaltonCollectorRole'
             Action: 'sts:AssumeRole'
             Condition:
               StringEquals:
