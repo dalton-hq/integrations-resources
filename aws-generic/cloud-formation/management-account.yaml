@@ -631,16 +631,26 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: EKSManageAgentlessAccessEntry
+          - Sid: EKSCreateAgentlessAccessEntry
             Effect: Allow
             Action:
               - 'eks:CreateAccessEntry'
-              - 'eks:DeleteAccessEntry'
-              - 'eks:DescribeAccessEntry'
-            Resource: '*'
+            Resource: !Sub 'arn:aws:eks:*:${AWS::AccountId}:cluster/*'
             Condition:
               StringEquals:
                 'eks:principalArn': !Sub 'arn:aws:iam::${AWS::AccountId}:role/Dalton-EKS-Agentless-${AWS::AccountId}'
+          # DeleteAccessEntry/DescribeAccessEntry are authorized against the
+          # access-entry resource ARN (which embeds the principal), and the
+          # eks:principalArn condition key is not populated for them — a
+          # StringEquals on it silently denies (hit live: cleanup on datasource
+          # deletion got AccessDeniedException). Scope by resource instead,
+          # exactly like the Associate/Disassociate statement below.
+          - Sid: EKSManageAgentlessAccessEntry
+            Effect: Allow
+            Action:
+              - 'eks:DeleteAccessEntry'
+              - 'eks:DescribeAccessEntry'
+            Resource: !Sub 'arn:aws:eks:*:${AWS::AccountId}:access-entry/*/role/${AWS::AccountId}/Dalton-EKS-Agentless-${AWS::AccountId}/*'
           - Sid: EKSManageAgentlessAccessPolicy
             Effect: Allow
             Action:
