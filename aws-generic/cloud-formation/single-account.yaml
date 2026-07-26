@@ -568,10 +568,12 @@ Resources:
               StringEquals:
                 'eks:principalArn': !Sub 'arn:aws:iam::${AWS::AccountId}:role/Dalton-EKS-Agentless-${AWS::AccountId}'
           # DeleteAccessEntry/DescribeAccessEntry are authorized against the
-          # access-entry resource ARN (which embeds the principal), and the
-          # eks:principalArn condition key is not populated for them — a
-          # StringEquals on it silently denies (hit live: cleanup on datasource
-          # deletion got AccessDeniedException). Scope by resource instead,
+          # access-entry resource ARN, and the eks:principalArn condition key
+          # only matches when the entry actually exists. Observed live: the
+          # same conditioned statement allowed deleting an existing entry but
+          # returned AccessDeniedException — not ResourceNotFoundException —
+          # when the entry was absent. Dalton's cleanup and recreate-on-enroll
+          # paths rely on a tolerable not-found, so scope by resource instead,
           # exactly like the Associate/Disassociate statement below.
           - Sid: EKSManageAgentlessAccessEntry
             Effect: Allow
