@@ -33,6 +33,8 @@ rules:
       - services
       - namespaces
       - replicationcontrollers
+      - services/proxy
+      - pods/portforward
     verbs:
       - get
       - list
